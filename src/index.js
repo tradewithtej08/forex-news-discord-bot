@@ -1,0 +1,205 @@
+import "dotenv/config";
+import {
+  Client,
+  GatewayIntentBits,
+  Events,
+  EmbedBuilder,
+  PermissionFlagsBits
+} from "discord.js";
+import { DateTime } from "luxon";
+import {
+  setGuildChannel,
+  getGuildConfig,
+  getEnabledGuilds,
+  removeGuild,
+  wasSent,
+  markSent,
+  cleanupOldAlerts
+} from "./db.js";
+import {
+  getTodayEvents,
+  buildDailyEmbeds,
+  buildReminderEmbed
+} from "./news.js";
+
+const IST = "Asia/Kolkata";
+
+if (!process.env.DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN in environment variables");
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+let cache = { date: null, events: [], warnings: [], fetchedAt: null };
+let tickRunning = false;
+
+function asEmbed(data) {
+  return new EmbedBuilder(data);
+}
+
+async function refreshNews(force = false) {
+  const now = DateTime.now().setZone(IST);
+  const today = now.toISODate();
+  const stale = !cache.fetchedAt || (Date.now() - cache.fetchedAt) > 10 * 60 * 1000 || cache.date !== today;
+  if (!force && !stale) return cache;
+
+  const result = await getTodayEvents();
+  cache = { date: today, events: result.events, warnings: result.warnings, fetchedAt: Date.now() };
+  if (cache.warnings.length) console.warn("[news warnings]", cache.warnings);
+  return cache;
+}
+
+async function resolveConfiguredChannel(config) {
+  try {
+    const guild = await client.guilds.fetch(config.guild_id);
+    const channel = await guild.channels.fetch(config.channel_id);
+    if (!channel?.isTextBased()) return null;
+    return channel;
+  } catch {
+    return null;
+  }
+}
+
+async function postDailyToGuild(config, force = false) {
+  const now = DateTime.now().setZone(IST);
+  const alertType = `daily-${now.toISODate()}`;
+  if (!force && wasSent(config.guild_id, now.toISODate(), alertType)) return;
+
+  const channel = await resolveConfiguredChannel(config);
+  if (!channel) return;
+
+  const { events, warnings } = await refreshNews(force);
+  const embeds = buildDailyEmbeds(events, now);
+  for (const embed of embeds) await channel.send({ embeds: [asEmbed(embed)] });
+
+  if (warnings.length) console.warn(`[${config.guild_id}] source warnings:`, warnings);
+  if (!force) markSent(config.guild_id, now.toISODate(), alertType);
+}
+
+async function processReminders(config, events, now) {
+  const channel = await resolveConfiguredChannel(config);
+  if (!channel) return;
+
+  for (const event of events) {
+    const mins = event.timeIst.diff(now, "minutes").minutes;
+    for (const target of [60, 15]) {
+      const due = mins <= target && mins > target - (70 / 60);
+      const type = `reminder-${target}`;
+      if (due && !wasSent(config.guild_id, event.key, type)) {
+        await channel.send({ embeds: [asEmbed(buildReminderEmbed(event, target))] });
+        markSent(config.guild_id, event.key, type);
+      }
+    }
+  }
+}
+
+async function schedulerTick() {
+  if (tickRunning) return;
+  tickRunning = true;
+
+  try {
+    const now = DateTime.now().setZone(IST);
+    if (now.hour === 6 && now.minute >= 50) await refreshNews();
+
+    const configs = getEnabledGuilds();
+    if (now.hour === 7 && now.minute === 0) {
+      await refreshNews(true);
+      for (const config of configs) {
+        try { await postDailyToGuild(config); }
+        catch (err) { console.error("Daily post failed:", config.guild_id, err); }
+      }
+    }
+
+    const { events } = await refreshNews();
+    for (const config of configs) {
+      try { await processReminders(config, events, now); }
+      catch (err) { console.error("Reminder failed:", config.guild_id, err); }
+    }
+
+    if (now.hour === 3 && now.minute === 0) cleanupOldAlerts();
+  } catch (err) {
+    console.error("Scheduler tick failed:", err);
+  } finally {
+    tickRunning = false;
+  }
+}
+
+client.once(Events.ClientReady, async readyClient => {
+  console.log(`Logged in as ${readyClient.user.tag}`);
+  console.log(`Serving ${readyClient.guilds.cache.size} Discord server(s).`);
+  await refreshNews(true).catch(console.error);
+  await schedulerTick();
+  setInterval(schedulerTick, 30_000);
+});
+
+client.on(Events.GuildDelete, guild => removeGuild(guild.id));
+
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.isChatInputCommand() || !interaction.guildId) return;
+
+  try {
+    if (interaction.commandName === "setup") {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+        return interaction.reply({ content: "You need **Manage Server** permission.", ephemeral: true });
+      }
+
+      const channel = interaction.options.getChannel("channel", true);
+      if (!channel.isTextBased()) {
+        return interaction.reply({ content: "Please select a text or announcement channel.", ephemeral: true });
+      }
+
+      const me = interaction.guild.members.me;
+      const perms = channel.permissionsFor(me);
+      if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages) || !perms?.has(PermissionFlagsBits.EmbedLinks)) {
+        return interaction.reply({
+          content: "I need **View Channel**, **Send Messages**, and **Embed Links** permissions in that channel.",
+          ephemeral: true
+        });
+      }
+
+      setGuildChannel(interaction.guildId, channel.id);
+      return interaction.reply({
+        content:
+          `✅ Setup complete. News channel: ${channel}\n` +
+          `📅 Daily news: **7:00 AM IST**\n` +
+          `⏰ Reminders: **1 hour** and **15 minutes** before each event\n` +
+          `🔴 Source: Forex Factory High Impact`,
+        ephemeral: true
+      });
+    }
+
+    if (interaction.commandName === "status") {
+      const cfg = getGuildConfig(interaction.guildId);
+      if (!cfg) return interaction.reply({ content: "❌ This server is not configured. An admin can run `/setup`.", ephemeral: true });
+      return interaction.reply({
+        content:
+          `✅ **Configured**\n` +
+          `Channel: <#${cfg.channel_id}>\n` +
+          `Daily post: **7:00 AM IST**\n` +
+          `Reminders: **1H + 15M**\n` +
+          `Countdown: **Off**\n` +
+          `News Live alert: **Off**`,
+        ephemeral: true
+      });
+    }
+
+    if (interaction.commandName === "testnews") {
+      await interaction.deferReply({ ephemeral: true });
+      const cfg = getGuildConfig(interaction.guildId);
+      if (!cfg) return interaction.editReply("Run `/setup` first.");
+      await refreshNews(true);
+      await postDailyToGuild(cfg, true);
+      return interaction.editReply("✅ Test news post sent to the configured channel.");
+    }
+
+    if (interaction.commandName === "remove") {
+      removeGuild(interaction.guildId);
+      return interaction.reply({ content: "✅ Forex news alerts have been disabled for this server.", ephemeral: true });
+    }
+  } catch (err) {
+    console.error("Command error:", err);
+    const msg = "❌ Something went wrong. Check the bot logs.";
+    if (interaction.deferred || interaction.replied) await interaction.editReply(msg).catch(() => {});
+    else await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
