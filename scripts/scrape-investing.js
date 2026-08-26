@@ -17,9 +17,7 @@ function parseTime(timeText) {
   const formats = ["HH:mm", "H:mm", "hh:mm a", "h:mm a"];
   for (const fmt of formats) {
     const t = DateTime.fromFormat(timeText, fmt, { zone: IST, locale: "en" });
-    if (t.isValid) {
-      return nowIst.startOf("day").set({ hour: t.hour, minute: t.minute });
-    }
+    if (t.isValid) return nowIst.startOf("day").set({ hour: t.hour, minute: t.minute });
   }
   return null;
 }
@@ -47,13 +45,7 @@ function parseRows(html) {
       return cls.includes("bull") || cls.includes("importance") || cls.includes("sentiment");
     }).length;
 
-    const isHigh =
-      impactText.includes("high") ||
-      titleText.includes("high") ||
-      impactHtml.includes("bull3") ||
-      impactHtml.includes("FullBullish") ||
-      iconCount >= 3;
-
+    const isHigh = impactText.includes("high") || titleText.includes("high") || impactHtml.includes("bull3") || impactHtml.includes("FullBullish") || iconCount >= 3;
     if (!isHigh) return;
 
     let dt = null;
@@ -70,15 +62,7 @@ function parseRows(html) {
     const forecast = clean(tr.find(".fore").first().text() || (cells.length > 5 ? cells.eq(5).text() : ""));
     const previous = clean(tr.find(".prev").first().text() || (cells.length > 6 ? cells.eq(6).text() : ""));
 
-    rows.push({
-      currency,
-      title: event,
-      timeIst: dt.toISO(),
-      forecast,
-      previous,
-      impact: 3,
-      source: "Investing.com"
-    });
+    rows.push({ currency, title: event, timeIst: dt.toISO(), forecast, previous, impact: 3, source: "Investing.com" });
   });
 
   const seen = new Set();
@@ -93,6 +77,7 @@ function parseRows(html) {
 const browser = await chromium.launch({ headless: true });
 let events = [];
 let diagnostics = {};
+let debug = {};
 
 try {
   const context = await browser.newContext({
@@ -104,34 +89,52 @@ try {
   const page = await context.newPage();
   const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-  try {
-    await page.locator("#onetrust-accept-btn-handler").click({ timeout: 5000 });
-  } catch {}
-
+  try { await page.locator("#onetrust-accept-btn-handler").click({ timeout: 5000 }); } catch {}
   await page.waitForTimeout(8000);
+
   const html = await page.content();
+  const $ = cheerio.load(html);
+  const allRows = $("tr").toArray();
+  const sampleRows = allRows.slice(0, 40).map((row, i) => {
+    const tr = $(row);
+    return {
+      index: i,
+      class: tr.attr("class") || "",
+      id: tr.attr("id") || "",
+      dataEventDatetime: tr.attr("data-event-datetime") || "",
+      text: clean(tr.text()).slice(0, 500),
+      html: (tr.html() || "").slice(0, 1500)
+    };
+  });
+
   events = parseRows(html).filter(e => DateTime.fromISO(e.timeIst).setZone(IST).toISODate() === dateIso);
 
   diagnostics = {
     pageStatus: response?.status() ?? null,
+    pageUrl: page.url(),
     pageTitle: await page.title(),
     htmlLength: html.length,
+    trCount: allRows.length,
+    jsEventItemCount: $("tr.js-event-item").length,
+    economicCalendarDataCount: $("#economicCalendarData").length,
     parsedEvents: events.length
+  };
+
+  debug = {
+    date: dateIso,
+    generatedAt: DateTime.now().setZone(IST).toISO(),
+    diagnostics,
+    bodyTextSample: clean($("body").text()).slice(0, 8000),
+    sampleRows
   };
 } finally {
   await browser.close();
 }
 
-const output = {
-  date: dateIso,
-  timezone: IST,
-  generatedAt: DateTime.now().setZone(IST).toISO(),
-  source: "Investing.com",
-  impact: "3-star/high",
-  events,
-  diagnostics
-};
+const output = { date: dateIso, timezone: IST, generatedAt: DateTime.now().setZone(IST).toISO(), source: "Investing.com", impact: "3-star/high", events, diagnostics };
 
 await fs.mkdir(path.resolve("data"), { recursive: true });
 await fs.writeFile(path.resolve("data/investing.json"), JSON.stringify(output, null, 2) + "\n", "utf8");
+await fs.writeFile(path.resolve("data/investing-debug.json"), JSON.stringify(debug, null, 2) + "\n", "utf8");
 console.log(`Saved ${events.length} Investing.com 3-star events for ${dateIso}`);
+console.log(`Diagnostics: ${JSON.stringify(diagnostics)}`);
