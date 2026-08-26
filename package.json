@@ -3,12 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "scrape:investing": "node scripts/scrape-investing.js"
-  },
   "dependencies": {
-    "cheerio": "^1.0.0",
-    "luxon": "^3.6.1",
-    "playwright": "^1.55.0"
+    "luxon": "^3.6.1"
   }
 }
