@@ -35,6 +35,14 @@ function asEmbed(data) {
   return new EmbedBuilder(data);
 }
 
+function everyonePayload(embed) {
+  return {
+    content: "@everyone",
+    embeds: [asEmbed(embed)],
+    allowedMentions: { parse: ["everyone"] }
+  };
+}
+
 async function refreshNews(force = false) {
   const now = DateTime.now().setZone(IST);
   const today = now.toISODate();
@@ -68,7 +76,11 @@ async function postDailyToGuild(config, force = false) {
 
   const { events, warnings } = await refreshNews(force);
   const embeds = buildDailyEmbeds(events, now);
-  for (const embed of embeds) await channel.send({ embeds: [asEmbed(embed)] });
+
+  for (let i = 0; i < embeds.length; i++) {
+    if (i === 0) await channel.send(everyonePayload(embeds[i]));
+    else await channel.send({ embeds: [asEmbed(embeds[i])] });
+  }
 
   if (warnings.length) console.warn(`[${config.guild_id}] source warnings:`, warnings);
   if (!force) markSent(config.guild_id, now.toISODate(), alertType);
@@ -84,7 +96,7 @@ async function processReminders(config, events, now) {
       const due = mins <= target && mins > target - (70 / 60);
       const type = `reminder-${target}`;
       if (due && !wasSent(config.guild_id, event.key, type)) {
-        await channel.send({ embeds: [asEmbed(buildReminderEmbed(event, target))] });
+        await channel.send(everyonePayload(buildReminderEmbed(event, target)));
         markSent(config.guild_id, event.key, type);
       }
     }
@@ -155,12 +167,20 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
+      if (!perms?.has(PermissionFlagsBits.MentionEveryone)) {
+        return interaction.reply({
+          content: "I also need **Mention @everyone, @here, and All Roles** permission in that channel so news alerts can ping everyone.",
+          ephemeral: true
+        });
+      }
+
       setGuildChannel(interaction.guildId, channel.id);
       return interaction.reply({
         content:
           `✅ Setup complete. News channel: ${channel}\n` +
           `📅 Daily news: **7:00 AM IST**\n` +
           `⏰ Reminders: **1 hour** and **15 minutes** before each event\n` +
+          `📢 Mentions: **@everyone enabled**\n` +
           `🔴 Source: Forex Factory High Impact`,
         ephemeral: true
       });
@@ -175,6 +195,7 @@ client.on(Events.InteractionCreate, async interaction => {
           `Channel: <#${cfg.channel_id}>\n` +
           `Daily post: **7:00 AM IST**\n` +
           `Reminders: **1H + 15M**\n` +
+          `Mentions: **@everyone**\n` +
           `Countdown: **Off**\n` +
           `News Live alert: **Off**`,
         ephemeral: true
@@ -187,7 +208,7 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!cfg) return interaction.editReply("Run `/setup` first.");
       await refreshNews(true);
       await postDailyToGuild(cfg, true);
-      return interaction.editReply("✅ Test news post sent to the configured channel.");
+      return interaction.editReply("✅ Test news post sent to the configured channel with @everyone.");
     }
 
     if (interaction.commandName === "remove") {
