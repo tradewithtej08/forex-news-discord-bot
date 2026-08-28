@@ -14,7 +14,9 @@ import {
   removeGuild,
   wasSent,
   markSent,
-  cleanupOldAlerts
+  cleanupOldAlerts,
+  saveNewsCache,
+  loadNewsCache
 } from "./db.js";
 import {
   getTodayEvents,
@@ -23,12 +25,13 @@ import {
 } from "./news.js";
 
 const IST = "Asia/Kolkata";
+const NEWS_CACHE_MS = 30 * 60 * 1000;
 
 if (!process.env.DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN in environment variables");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-let cache = { date: null, events: [], warnings: [], fetchedAt: null };
+let cache = { date: null, events: [], warnings: [], fetchedAt: null, fromFallback: false };
 let tickRunning = false;
 
 function asEmbed(data) {
@@ -46,12 +49,57 @@ function everyonePayload(embed) {
 async function refreshNews(force = false) {
   const now = DateTime.now().setZone(IST);
   const today = now.toISODate();
-  const stale = !cache.fetchedAt || (Date.now() - cache.fetchedAt) > 10 * 60 * 1000 || cache.date !== today;
+  const stale = !cache.fetchedAt || (Date.now() - cache.fetchedAt) > NEWS_CACHE_MS || cache.date !== today;
   if (!force && !stale) return cache;
 
+  const previous = cache;
   const result = await getTodayEvents();
-  cache = { date: today, events: result.events, warnings: result.warnings, fetchedAt: Date.now() };
-  if (cache.warnings.length) console.warn("[news warnings]", cache.warnings);
+
+  if (result.warnings.length) {
+    console.warn("[news warnings]", result.warnings);
+
+    if (previous.date === today && previous.events.length) {
+      cache = {
+        ...previous,
+        warnings: result.warnings,
+        fetchedAt: Date.now(),
+        fromFallback: true
+      };
+      console.warn(`[news cache] Using in-memory fallback with ${cache.events.length} event(s).`);
+      return cache;
+    }
+
+    const stored = loadNewsCache(today);
+    if (stored?.events?.length) {
+      cache = {
+        date: today,
+        events: stored.events,
+        warnings: result.warnings,
+        fetchedAt: Date.now(),
+        fromFallback: true
+      };
+      console.warn(`[news cache] Using persistent fallback with ${cache.events.length} event(s).`);
+      return cache;
+    }
+
+    cache = {
+      date: today,
+      events: [],
+      warnings: result.warnings,
+      fetchedAt: Date.now(),
+      fromFallback: false
+    };
+    return cache;
+  }
+
+  cache = {
+    date: today,
+    events: result.events,
+    warnings: [],
+    fetchedAt: Date.now(),
+    fromFallback: false
+  };
+  saveNewsCache(today, result.events);
   return cache;
 }
 
@@ -66,15 +114,15 @@ async function resolveConfiguredChannel(config) {
   }
 }
 
-async function postDailyToGuild(config, force = false) {
+async function postDailyToGuild(config, forcePost = false) {
   const now = DateTime.now().setZone(IST);
   const alertType = `daily-${now.toISODate()}`;
-  if (!force && wasSent(config.guild_id, now.toISODate(), alertType)) return;
+  if (!forcePost && wasSent(config.guild_id, now.toISODate(), alertType)) return;
 
   const channel = await resolveConfiguredChannel(config);
   if (!channel) return;
 
-  const { events, warnings } = await refreshNews(force);
+  const { events, warnings, fromFallback } = await refreshNews(false);
   const embeds = buildDailyEmbeds(events, now);
 
   for (let i = 0; i < embeds.length; i++) {
@@ -83,7 +131,8 @@ async function postDailyToGuild(config, force = false) {
   }
 
   if (warnings.length) console.warn(`[${config.guild_id}] source warnings:`, warnings);
-  if (!force) markSent(config.guild_id, now.toISODate(), alertType);
+  if (fromFallback) console.warn(`[${config.guild_id}] Posted cached Forex Factory data because live fetch was unavailable.`);
+  if (!forcePost) markSent(config.guild_id, now.toISODate(), alertType);
 }
 
 async function processReminders(config, events, now) {
@@ -109,18 +158,18 @@ async function schedulerTick() {
 
   try {
     const now = DateTime.now().setZone(IST);
-    if (now.hour === 6 && now.minute >= 50) await refreshNews();
+    if (now.hour === 6 && now.minute >= 50) await refreshNews(false);
 
     const configs = getEnabledGuilds();
     if (now.hour === 7 && now.minute === 0) {
-      await refreshNews(true);
+      await refreshNews(false);
       for (const config of configs) {
         try { await postDailyToGuild(config); }
         catch (err) { console.error("Daily post failed:", config.guild_id, err); }
       }
     }
 
-    const { events } = await refreshNews();
+    const { events } = await refreshNews(false);
     for (const config of configs) {
       try { await processReminders(config, events, now); }
       catch (err) { console.error("Reminder failed:", config.guild_id, err); }
@@ -137,7 +186,7 @@ async function schedulerTick() {
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Serving ${readyClient.guilds.cache.size} Discord server(s).`);
-  await refreshNews(true).catch(console.error);
+  await refreshNews(false).catch(console.error);
   await schedulerTick();
   setInterval(schedulerTick, 30_000);
 });
@@ -206,7 +255,6 @@ client.on(Events.InteractionCreate, async interaction => {
       await interaction.deferReply({ ephemeral: true });
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg) return interaction.editReply("Run `/setup` first.");
-      await refreshNews(true);
       await postDailyToGuild(cfg, true);
       return interaction.editReply("✅ Test news post sent to the configured channel with @everyone.");
     }
