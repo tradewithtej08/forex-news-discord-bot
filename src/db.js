@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { DateTime } from "luxon";
 
 const dbPath = process.env.DB_PATH || "./data/bot.db";
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -23,6 +24,12 @@ CREATE TABLE IF NOT EXISTS sent_alerts (
   alert_type TEXT NOT NULL,
   sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (guild_id, event_key, alert_type)
+);
+
+CREATE TABLE IF NOT EXISTS news_cache (
+  cache_date TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `);
 
@@ -64,9 +71,45 @@ export function markSent(guildId, eventKey, alertType) {
   `).run(guildId, eventKey, alertType);
 }
 
+export function saveNewsCache(cacheDate, events) {
+  const serializable = events.map(event => ({
+    ...event,
+    timeIst: event.timeIst?.toISO ? event.timeIst.toISO() : event.timeIst
+  }));
+
+  db.prepare(`
+    INSERT INTO news_cache (cache_date, payload, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(cache_date) DO UPDATE SET
+      payload=excluded.payload,
+      updated_at=CURRENT_TIMESTAMP
+  `).run(cacheDate, JSON.stringify(serializable));
+}
+
+export function loadNewsCache(cacheDate) {
+  const row = db.prepare("SELECT payload, updated_at FROM news_cache WHERE cache_date = ?").get(cacheDate);
+  if (!row) return null;
+
+  try {
+    const events = JSON.parse(row.payload).map(event => ({
+      ...event,
+      timeIst: DateTime.fromISO(event.timeIst, { setZone: true })
+    })).filter(event => event.timeIst.isValid);
+
+    return { events, updatedAt: row.updated_at };
+  } catch {
+    return null;
+  }
+}
+
 export function cleanupOldAlerts() {
   db.prepare(`
     DELETE FROM sent_alerts
     WHERE sent_at < datetime('now', '-14 days')
+  `).run();
+
+  db.prepare(`
+    DELETE FROM news_cache
+    WHERE cache_date < date('now', '-7 days')
   `).run();
 }
