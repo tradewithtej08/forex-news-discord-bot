@@ -4,7 +4,8 @@ import {
   GatewayIntentBits,
   Events,
   EmbedBuilder,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ChannelType
 } from "discord.js";
 import { DateTime } from "luxon";
 import {
@@ -46,6 +47,10 @@ function everyonePayload(embed) {
   };
 }
 
+function isSupportedTextChannel(channel) {
+  return channel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type);
+}
+
 async function refreshNews(force = false) {
   const now = DateTime.now().setZone(IST);
   const today = now.toISODate();
@@ -59,46 +64,23 @@ async function refreshNews(force = false) {
     console.warn("[news warnings]", result.warnings);
 
     if (previous.date === today && previous.events.length) {
-      cache = {
-        ...previous,
-        warnings: result.warnings,
-        fetchedAt: Date.now(),
-        fromFallback: true
-      };
+      cache = { ...previous, warnings: result.warnings, fetchedAt: Date.now(), fromFallback: true };
       console.warn(`[news cache] Using in-memory fallback with ${cache.events.length} event(s).`);
       return cache;
     }
 
     const stored = loadNewsCache(today);
     if (stored?.events?.length) {
-      cache = {
-        date: today,
-        events: stored.events,
-        warnings: result.warnings,
-        fetchedAt: Date.now(),
-        fromFallback: true
-      };
+      cache = { date: today, events: stored.events, warnings: result.warnings, fetchedAt: Date.now(), fromFallback: true };
       console.warn(`[news cache] Using persistent fallback with ${cache.events.length} event(s).`);
       return cache;
     }
 
-    cache = {
-      date: today,
-      events: [],
-      warnings: result.warnings,
-      fetchedAt: Date.now(),
-      fromFallback: false
-    };
+    cache = { date: today, events: [], warnings: result.warnings, fetchedAt: Date.now(), fromFallback: false };
     return cache;
   }
 
-  cache = {
-    date: today,
-    events: result.events,
-    warnings: [],
-    fetchedAt: Date.now(),
-    fromFallback: false
-  };
+  cache = { date: today, events: result.events, warnings: [], fetchedAt: Date.now(), fromFallback: false };
   saveNewsCache(today, result.events);
   return cache;
 }
@@ -107,7 +89,7 @@ async function resolveConfiguredChannel(config) {
   try {
     const guild = await client.guilds.fetch(config.guild_id);
     const channel = await guild.channels.fetch(config.channel_id);
-    if (!channel?.isTextBased()) return null;
+    if (!isSupportedTextChannel(channel)) return null;
     return channel;
   } catch {
     return null;
@@ -203,12 +185,18 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const channel = interaction.options.getChannel("channel", true);
-      if (!channel.isTextBased()) {
+      if (!isSupportedTextChannel(channel)) {
         return interaction.reply({ content: "Please select a text or announcement channel.", ephemeral: true });
       }
 
-      const me = interaction.guild.members.me;
-      const perms = channel.permissionsFor(me);
+      const guild = await client.guilds.fetch(interaction.guildId);
+      const me = await guild.members.fetchMe();
+      const freshChannel = await guild.channels.fetch(channel.id);
+      if (!isSupportedTextChannel(freshChannel)) {
+        return interaction.reply({ content: "Please select a text or announcement channel.", ephemeral: true });
+      }
+
+      const perms = freshChannel.permissionsFor(me);
       if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages) || !perms?.has(PermissionFlagsBits.EmbedLinks)) {
         return interaction.reply({
           content: "I need **View Channel**, **Send Messages**, and **Embed Links** permissions in that channel.",
@@ -223,10 +211,10 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      setGuildChannel(interaction.guildId, channel.id);
+      setGuildChannel(interaction.guildId, freshChannel.id);
       return interaction.reply({
         content:
-          `✅ Setup complete. News channel: ${channel}\n` +
+          `✅ Setup complete. News channel: ${freshChannel}\n` +
           `📅 Daily news: **7:00 AM IST**\n` +
           `⏰ Reminders: **1 hour** and **15 minutes** before each event\n` +
           `📢 Mentions: **@everyone enabled**\n` +
