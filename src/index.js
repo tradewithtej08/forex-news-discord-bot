@@ -36,6 +36,30 @@ function everyonePayload(embed) {
 function isSupportedTextChannel(channel) {
   return channel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type);
 }
+function normalizeChannelName(name = "") {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+function findNewsChannel(guild) {
+  const preferred = ["red-folder-news", "redfoldernews", "forex-news", "news"];
+  const channels = [...guild.channels.cache.values()].filter(isSupportedTextChannel);
+  return channels.find(ch => preferred.includes(normalizeChannelName(ch.name))) || null;
+}
+
+async function recoverMissingGuildConfigs() {
+  let recovered = 0;
+  for (const guild of client.guilds.cache.values()) {
+    if (getGuildConfig(guild.id)) continue;
+    const channel = findNewsChannel(guild);
+    if (!channel) {
+      console.warn(`[guild ${guild.id}] No saved config and no #red-folder-news style channel found.`);
+      continue;
+    }
+    setGuildChannel(guild.id, channel.id);
+    recovered += 1;
+    console.log(`[guild ${guild.id}] Recovered news config -> #${channel.name}`);
+  }
+  return recovered;
+}
 
 async function refreshNews(force = false) {
   const now = DateTime.now().setZone(IST);
@@ -66,10 +90,27 @@ async function refreshNews(force = false) {
 async function resolveConfiguredChannel(config) {
   try {
     const guild = client.guilds.cache.get(config.guild_id);
-    if (!guild) return null;
-    const channel = guild.channels.cache.get(config.channel_id) || await guild.channels.fetch(config.channel_id).catch(() => null);
-    return isSupportedTextChannel(channel) ? channel : null;
-  } catch { return null; }
+    if (!guild) {
+      console.warn(`[guild ${config.guild_id}] Bot is not currently in this guild; skipping.`);
+      return null;
+    }
+    let channel = guild.channels.cache.get(config.channel_id) || null;
+    if (!channel) channel = await guild.channels.fetch(config.channel_id).catch(() => null);
+    if (!isSupportedTextChannel(channel)) {
+      const fallback = findNewsChannel(guild);
+      if (fallback) {
+        setGuildChannel(guild.id, fallback.id);
+        console.log(`[guild ${guild.id}] Recovered missing channel -> #${fallback.name}`);
+        return fallback;
+      }
+      console.warn(`[guild ${guild.id}] Configured channel unavailable and no fallback found.`);
+      return null;
+    }
+    return channel;
+  } catch (err) {
+    console.error(`[guild ${config.guild_id}] Channel resolve failed:`, err);
+    return null;
+  }
 }
 
 async function postDailyToGuild(config, forcePost = false) {
@@ -84,6 +125,7 @@ async function postDailyToGuild(config, forcePost = false) {
     if (i === 0) await channel.send(everyonePayload(embeds[i]));
     else await channel.send({ embeds: [asEmbed(embeds[i])] });
   }
+  console.log(`[guild ${config.guild_id}] Daily news posted to #${channel.name}`);
   if (warnings.length) console.warn(`[${config.guild_id}] source warnings:`, warnings);
   if (fromFallback) console.warn(`[${config.guild_id}] Posted cached Forex Factory data because live fetch was unavailable.`);
   if (!forcePost) markSent(config.guild_id, now.toISODate(), alertType);
@@ -100,6 +142,7 @@ async function processReminders(config, events, now) {
       if (due && !wasSent(config.guild_id, event.key, type)) {
         await channel.send(everyonePayload(buildReminderEmbed(event, target)));
         markSent(config.guild_id, event.key, type);
+        console.log(`[guild ${config.guild_id}] ${target}m reminder posted to #${channel.name}`);
       }
     }
   }
@@ -110,17 +153,25 @@ async function schedulerTick() {
   tickRunning = true;
   try {
     const now = DateTime.now().setZone(IST);
+    if (now.minute === 55) await recoverMissingGuildConfigs();
     if (now.hour === 6 && now.minute >= 50) await refreshNews(false);
+
     const configs = getEnabledGuilds();
     if (now.hour === 7 && now.minute === 0) {
+      await recoverMissingGuildConfigs();
       await refreshNews(false);
-      for (const config of configs) {
-        try { await postDailyToGuild(config); } catch (err) { console.error("Daily post failed:", config.guild_id, err); }
+      const currentConfigs = getEnabledGuilds();
+      console.log(`[daily] ${currentConfigs.length} configured server(s), ${client.guilds.cache.size} connected server(s).`);
+      for (const config of currentConfigs) {
+        try { await postDailyToGuild(config); }
+        catch (err) { console.error("Daily post failed:", config.guild_id, err); }
       }
     }
+
     const { events } = await refreshNews(false);
     for (const config of configs) {
-      try { await processReminders(config, events, now); } catch (err) { console.error("Reminder failed:", config.guild_id, err); }
+      try { await processReminders(config, events, now); }
+      catch (err) { console.error("Reminder failed:", config.guild_id, err); }
     }
     if (now.hour === 3 && now.minute === 0) cleanupOldAlerts();
   } catch (err) { console.error("Scheduler tick failed:", err); }
@@ -129,10 +180,21 @@ async function schedulerTick() {
 
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
-  console.log(`Serving ${readyClient.guilds.cache.size} Discord server(s).`);
+  console.log(`Connected to ${readyClient.guilds.cache.size} Discord server(s).`);
+  await recoverMissingGuildConfigs();
+  console.log(`Configured ${getEnabledGuilds().length} server(s) for news.`);
   await refreshNews(false).catch(console.error);
   await schedulerTick();
   setInterval(schedulerTick, 30_000);
+});
+
+client.on(Events.GuildCreate, async guild => {
+  console.log(`Joined guild ${guild.id} (${guild.name}). Connected guilds: ${client.guilds.cache.size}`);
+  const channel = findNewsChannel(guild);
+  if (channel && !getGuildConfig(guild.id)) {
+    setGuildChannel(guild.id, channel.id);
+    console.log(`[guild ${guild.id}] Auto-configured #${channel.name}`);
+  }
 });
 client.on(Events.GuildDelete, guild => removeGuild(guild.id));
 
@@ -147,11 +209,8 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!isSupportedTextChannel(channel)) {
         return interaction.reply({ content: "Please select a text or announcement channel.", ephemeral: true });
       }
-
-      // Use the guild/channel/member objects attached to this interaction.
-      // This avoids REST guild fetches that can return Unknown Guild immediately after joining a new server.
-      const guild = interaction.guild;
-      if (!guild) return interaction.reply({ content: "❌ I could not access this server. Please re-invite the bot with the bot + applications.commands scopes.", ephemeral: true });
+      const guild = interaction.guild || client.guilds.cache.get(interaction.guildId);
+      if (!guild) return interaction.reply({ content: "❌ I could not access this server. Please make sure the bot itself is added to the server.", ephemeral: true });
       const me = guild.members.me;
       if (!me) return interaction.reply({ content: "❌ I could not read my server permissions. Please check the bot role and try again.", ephemeral: true });
       const perms = channel.permissionsFor(me);
@@ -162,6 +221,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.reply({ content: "I also need **Mention @everyone, @here, and All Roles** permission in that channel so news alerts can ping everyone.", ephemeral: true });
       }
       setGuildChannel(interaction.guildId, channel.id);
+      console.log(`[guild ${interaction.guildId}] /setup saved #${channel.name}`);
       return interaction.reply({
         content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **7:00 AM IST**\n⏰ Reminders: **1 hour** and **15 minutes** before each event\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`,
         ephemeral: true
@@ -176,11 +236,16 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === "testnews") {
       await interaction.deferReply({ ephemeral: true });
-      const cfg = getGuildConfig(interaction.guildId);
+      let cfg = getGuildConfig(interaction.guildId);
+      if (!cfg) {
+        await recoverMissingGuildConfigs();
+        cfg = getGuildConfig(interaction.guildId);
+      }
       if (!cfg) return interaction.editReply("Run `/setup` first.");
       await postDailyToGuild(cfg, true);
       return interaction.editReply("✅ Test news post sent to the configured channel with @everyone.");
     }
+
     if (interaction.commandName === "remove") {
       removeGuild(interaction.guildId);
       return interaction.reply({ content: "✅ Forex news alerts have been disabled for this server.", ephemeral: true });
