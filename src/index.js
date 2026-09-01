@@ -136,14 +136,13 @@ async function processReminders(config, events, now) {
   if (!channel) return;
   for (const event of events) {
     const mins = event.timeIst.diff(now, "minutes").minutes;
-    for (const target of [60, 15]) {
-      const due = mins <= target && mins > target - (70 / 60);
-      const type = `reminder-${target}`;
-      if (due && !wasSent(config.guild_id, event.key, type)) {
-        await channel.send(everyonePayload(buildReminderEmbed(event, target)));
-        markSent(config.guild_id, event.key, type);
-        console.log(`[guild ${config.guild_id}] ${target}m reminder posted to #${channel.name}`);
-      }
+    const target = 15;
+    const due = mins <= target && mins > target - (70 / 60);
+    const type = "reminder-15";
+    if (due && !wasSent(config.guild_id, event.key, type)) {
+      await channel.send(everyonePayload(buildReminderEmbed(event, target)));
+      markSent(config.guild_id, event.key, type);
+      console.log(`[guild ${config.guild_id}] 15m reminder posted to #${channel.name}`);
     }
   }
 }
@@ -223,7 +222,7 @@ client.on(Events.InteractionCreate, async interaction => {
       setGuildChannel(interaction.guildId, channel.id);
       console.log(`[guild ${interaction.guildId}] /setup saved #${channel.name}`);
       return interaction.reply({
-        content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **7:00 AM IST**\n⏰ Reminders: **1 hour** and **15 minutes** before each event\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`,
+        content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **7:00 AM IST**\n⏰ Reminder: **15 minutes** before each event\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`,
         ephemeral: true
       });
     }
@@ -231,7 +230,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.commandName === "status") {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg) return interaction.reply({ content: "❌ This server is not configured. An admin can run `/setup`.", ephemeral: true });
-      return interaction.reply({ content: `✅ **Configured**\nChannel: <#${cfg.channel_id}>\nDaily post: **7:00 AM IST**\nReminders: **1H + 15M**\nMentions: **@everyone**\nCountdown: **Off**\nNews Live alert: **Off**`, ephemeral: true });
+      return interaction.reply({ content: `✅ **Configured**\nChannel: <#${cfg.channel_id}>\nDaily post: **7:00 AM IST**\nReminder: **15M only**\nMentions: **@everyone**\nCountdown: **Off**\nNews Live alert: **Off**`, ephemeral: true });
     }
 
     if (interaction.commandName === "testnews") {
