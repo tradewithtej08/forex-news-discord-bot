@@ -111,23 +111,6 @@ export function buildDailyEmbeds(events, date = DateTime.now().setZone(IST)) {
     ].filter(Boolean).join("\n")).join("\n\n"),
 
     color: 0xd32f2f,
-    footer: {
-      text: "Automatic reminder: 15 minutes before news • IST"
-    }
-  }));
-}
-
-export function buildReminderEmbed(event) {
-  return {
-    title: "🚨 15 MINUTES NEWS REMINDER",
-    description: [
-      `**${event.currency} — ${event.title}**`,
-      `🕒 News Time: **${formatTime(event.timeIst)} IST**`,
-      "🔴 Forex Factory: **Red Folder / High Impact**",
-      "",
-      "⚠️ High-impact news ahead. Manage trading risk accordingly."
-    ].join("\n"),
-    color: 0xef4444,
     footer: { text: "Source: Forex Factory • Timezone: IST" }
-  };
+  }));
 }
