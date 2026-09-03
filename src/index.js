@@ -104,11 +104,11 @@ async function schedulerTick() {
   tickRunning = true;
   try {
     const now = DateTime.now().setZone(IST);
-    if (now.minute === 55) await recoverMissingGuildConfigs();
-    if (now.hour === 6 && now.minute >= 50) await refreshNews(false);
-    if (now.hour === 7 && now.minute === 0) {
+    if (now.hour === 23 && now.minute === 55) await recoverMissingGuildConfigs();
+    if (now.hour === 23 && now.minute >= 50) await refreshNews(false);
+    if (now.hour === 0 && now.minute === 0) {
       await recoverMissingGuildConfigs();
-      await refreshNews(false);
+      await refreshNews(true);
       const currentConfigs = getEnabledGuilds();
       console.log(`[daily] ${currentConfigs.length} configured server(s), ${client.guilds.cache.size} connected server(s).`);
       for (const config of currentConfigs) {
@@ -157,12 +157,12 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!perms?.has(PermissionFlagsBits.MentionEveryone)) return interaction.reply({ content: "I also need **Mention @everyone, @here, and All Roles** permission in that channel so news alerts can ping everyone.", ephemeral: true });
       setGuildChannel(interaction.guildId, channel.id);
       console.log(`[guild ${interaction.guildId}] /setup saved #${channel.name}`);
-      return interaction.reply({ content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **7:00 AM IST**\n⏰ Reminders: **Off**\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`, ephemeral: true });
+      return interaction.reply({ content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **12:00 AM IST (midnight)**\n⏰ Reminders: **Off**\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`, ephemeral: true });
     }
     if (interaction.commandName === "status") {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg) return interaction.reply({ content: "❌ This server is not configured. An admin can run `/setup`.", ephemeral: true });
-      return interaction.reply({ content: `✅ **Configured**\nChannel: <#${cfg.channel_id}>\nDaily post: **7:00 AM IST**\nReminders: **Off**\nMentions: **@everyone**\nCountdown: **Off**\nNews Live alert: **Off**`, ephemeral: true });
+      return interaction.reply({ content: `✅ **Configured**\nChannel: <#${cfg.channel_id}>\nDaily post: **12:00 AM IST (midnight)**\nReminders: **Off**\nMentions: **@everyone**\nCountdown: **Off**\nNews Live alert: **Off**`, ephemeral: true });
     }
     if (interaction.commandName === "testnews") {
       await interaction.deferReply({ ephemeral: true });
