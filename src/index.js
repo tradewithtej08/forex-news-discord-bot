@@ -2,14 +2,17 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, Events, EmbedBuilder, PermissionFlagsBits, ChannelType } from "discord.js";
 import { DateTime } from "luxon";
 import { setGuildChannel, getGuildConfig, getEnabledGuilds, removeGuild, wasSent, markSent, cleanupOldAlerts, saveNewsCache, loadNewsCache } from "./db.js";
-import { getTodayEvents, buildDailyEmbeds, buildReminderEmbed } from "./news.js";
+import { getTodayEvents, buildDailyEmbeds, buildReminderEmbed, buildResultEmbed } from "./news.js";
 
 const IST = "Asia/Kolkata";
 const NEWS_CACHE_MS = 30 * 60 * 1000;
+const RESULT_POLL_MS = 60 * 1000;
 if (!process.env.DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN in environment variables");
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 let cache = { date: null, events: [], warnings: [], fetchedAt: null, fromFallback: false };
 let tickRunning = false;
+let lastResultPollAt = 0;
+
 function asEmbed(data) { return new EmbedBuilder(data); }
 function everyonePayload(embed) { return { content: "@everyone", embeds: [asEmbed(embed)], allowedMentions: { parse: ["everyone"] } }; }
 function isSupportedTextChannel(channel) { return channel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type); }
@@ -83,6 +86,18 @@ async function process15MinuteReminders(config, events, now) {
     }
   }
 }
+async function processNewsResults(config, events, now) {
+  const channel = await resolveConfiguredChannel(config); if (!channel) return;
+  for (const event of events) {
+    const minsSince = now.diff(event.timeIst, "minutes").minutes;
+    if (minsSince < 0 || minsSince > 90 || !event.actual) continue;
+    const type = "news-result";
+    if (wasSent(config.guild_id, event.key, type)) continue;
+    await channel.send(everyonePayload(buildResultEmbed(event)));
+    markSent(config.guild_id, event.key, type);
+    console.log(`[guild ${config.guild_id}] Result posted for ${event.currency} ${event.title} -> ${event.actual}`);
+  }
+}
 async function schedulerTick() {
   if (tickRunning) return; tickRunning = true;
   try {
@@ -95,8 +110,22 @@ async function schedulerTick() {
       console.log(`[daily] ${currentConfigs.length} configured server(s), ${client.guilds.cache.size} connected server(s).`);
       for (const config of currentConfigs) try { await postDailyToGuild(config); } catch (err) { console.error("Daily post failed:", config.guild_id, err); }
     }
-    const { events } = await refreshNews(false);
-    for (const config of getEnabledGuilds()) try { await process15MinuteReminders(config, events, now); } catch (err) { console.error("15m reminder failed:", config.guild_id, err); }
+
+    let { events } = await refreshNews(false);
+    const resultWindowOpen = events.some(event => {
+      const minsSince = now.diff(event.timeIst, "minutes").minutes;
+      return minsSince >= 0 && minsSince <= 90 && !event.actual;
+    });
+    if (resultWindowOpen && Date.now() - lastResultPollAt >= RESULT_POLL_MS) {
+      lastResultPollAt = Date.now();
+      ({ events } = await refreshNews(true));
+    }
+
+    const configs = getEnabledGuilds();
+    for (const config of configs) {
+      try { await process15MinuteReminders(config, events, now); } catch (err) { console.error("15m reminder failed:", config.guild_id, err); }
+      try { await processNewsResults(config, events, now); } catch (err) { console.error("News result failed:", config.guild_id, err); }
+    }
     if (now.hour === 3 && now.minute === 0) cleanupOldAlerts();
   } catch (err) { console.error("Scheduler tick failed:", err); }
   finally { tickRunning = false; }
@@ -125,12 +154,12 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages) || !perms?.has(PermissionFlagsBits.EmbedLinks)) return interaction.reply({ content: "I need **View Channel**, **Send Messages**, and **Embed Links** permissions in that channel.", ephemeral: true });
       if (!perms?.has(PermissionFlagsBits.MentionEveryone)) return interaction.reply({ content: "I also need **Mention @everyone, @here, and All Roles** permission.", ephemeral: true });
       setGuildChannel(interaction.guildId, channel.id);
-      return interaction.reply({ content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **12:00 AM IST (midnight)**\n⏰ Reminder: **15 minutes before news**\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`, ephemeral: true });
+      return interaction.reply({ content: `✅ Setup complete. News channel: ${channel}\n📅 Daily news: **12:00 AM IST (midnight)**\n⏰ Reminder: **15 minutes before news**\n📊 Results: **Auto-post after release**\n📢 Mentions: **@everyone enabled**\n🔴 Source: Forex Factory High Impact`, ephemeral: true });
     }
     if (interaction.commandName === "status") {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg) return interaction.reply({ content: "❌ This server is not configured. An admin can run `/setup`.", ephemeral: true });
-      return interaction.reply({ content: `✅ **Configured**\nChannel: <#${cfg.channel_id}>\nDaily post: **12:00 AM IST (midnight)**\nReminder: **15 minutes before news**\nMentions: **@everyone**\nCountdown: **Off**\nNews Live alert: **Off**`, ephemeral: true });
+      return interaction.reply({ content: `✅ **Configured**\nChannel: <#${cfg.channel_id}>\nDaily post: **12:00 AM IST (midnight)**\nReminder: **15 minutes before news**\nResults: **Auto-post after release**\nMentions: **@everyone**\nCountdown: **Off**`, ephemeral: true });
     }
     if (interaction.commandName === "testnews") {
       await interaction.deferReply({ ephemeral: true }); let cfg = getGuildConfig(interaction.guildId);
