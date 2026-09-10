@@ -24,9 +24,13 @@ async function fetchJson(url) {
 export async function fetchForexFactoryHighImpact() {
   const items = await fetchJson(FF_URL);
   return items.filter(x => String(x.impact).toLowerCase() === "high").map(x => ({
-    title: clean(x.title), currency: clean(x.country || "ALL").toUpperCase(),
+    title: clean(x.title),
+    currency: clean(x.country || "ALL").toUpperCase(),
     timeIst: DateTime.fromISO(x.date, { setZone: true }).setZone(IST),
-    forecast: clean(x.forecast), previous: clean(x.previous), source: "Forex Factory",
+    forecast: clean(x.forecast),
+    previous: clean(x.previous),
+    actual: clean(x.actual),
+    source: "Forex Factory",
     sourceDetails: { forexFactory: "High Impact" }
   })).filter(x => x.timeIst.isValid).map(x => ({ ...x, key: eventKey(x) })).sort((a, b) => a.timeIst.toMillis() - b.timeIst.toMillis());
 }
@@ -46,7 +50,7 @@ export function buildDailyEmbeds(events, date = DateTime.now().setZone(IST)) {
     title: index === 0 ? `📅 HIGH IMPACT NEWS — ${date.toFormat("dd LLL yyyy").toUpperCase()}` : "📅 HIGH IMPACT NEWS — CONTINUED",
     description: chunk.map(e => [`**${e.currency} — ${e.title}**`, `🕒 **${formatTime(e.timeIst)} IST**`, "🔴 FF Red Folder", e.forecast ? `Forecast: **${e.forecast}**${e.previous ? ` • Previous: **${e.previous}**` : ""}` : (e.previous ? `Previous: **${e.previous}**` : "")].filter(Boolean).join("\n")).join("\n\n"),
     color: 0xd32f2f,
-    footer: { text: "15-minute reminder enabled • Source: Forex Factory • IST" }
+    footer: { text: "15-minute reminder + result updates enabled • Source: Forex Factory • IST" }
   }));
 }
 export function buildReminderEmbed(event) {
@@ -54,6 +58,22 @@ export function buildReminderEmbed(event) {
     title: "🚨 NEWS IN 15 MINUTES",
     description: [`**${event.currency} — ${event.title}**`, `🕒 News Time: **${formatTime(event.timeIst)} IST**`, "🔴 Forex Factory: **Red Folder / High Impact**", "", "⚠️ High-impact news in 15 minutes. Manage trading risk accordingly."].join("\n"),
     color: 0xef4444,
+    footer: { text: "Source: Forex Factory • Timezone: IST" }
+  };
+}
+export function buildResultEmbed(event) {
+  const lines = [
+    `**${event.currency} — ${event.title}**`,
+    `🕒 News Time: **${formatTime(event.timeIst)} IST**`,
+    "",
+    `📊 Actual: **${event.actual || "N/A"}**`,
+    event.forecast ? `🎯 Forecast: **${event.forecast}**` : null,
+    event.previous ? `📋 Previous: **${event.previous}**` : null
+  ].filter(Boolean);
+  return {
+    title: "✅ NEWS RESULT RELEASED",
+    description: lines.join("\n"),
+    color: 0x22c55e,
     footer: { text: "Source: Forex Factory • Timezone: IST" }
   };
 }
