@@ -14,6 +14,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 let cache = { date: null, events: [], warnings: [], fetchedAt: null, fromFallback: false };
 let tickRunning = false;
 let lastResultPollAt = 0;
+let lastDailyRunDate = null;
 
 function asEmbed(data) { return new EmbedBuilder(data); }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -38,60 +39,42 @@ async function alreadyPostedInDiscord(channel, embedData) {
     return false;
   }
 }
-
 async function sendUniqueEmbed(channel, embedData, pingEveryone = true) {
   if (await alreadyPostedInDiscord(channel, embedData)) {
     console.log(`[channel ${channel.id}] Duplicate post blocked: ${embedData.title}`);
     return false;
   }
   const payload = { embeds: [asEmbed(embedData)] };
-  if (pingEveryone) {
-    payload.content = "@everyone";
-    payload.allowedMentions = { parse: ["everyone"] };
-  }
+  if (pingEveryone) { payload.content = "@everyone"; payload.allowedMentions = { parse: ["everyone"] }; }
   await channel.send(payload);
   return true;
 }
-
 async function recoverMissingGuildConfigs() {
   let recovered = 0;
   for (const guild of client.guilds.cache.values()) {
     if (getGuildConfig(guild.id)) continue;
     const channel = findNewsChannel(guild);
     if (!channel) { console.warn(`[guild ${guild.id}] No saved config and no #red-folder-news style channel found.`); continue; }
-    setGuildChannel(guild.id, channel.id);
-    recovered += 1;
+    setGuildChannel(guild.id, channel.id); recovered += 1;
     console.log(`[guild ${guild.id}] Recovered news config -> #${channel.name}`);
   }
   return recovered;
 }
-
 async function refreshNews(force = false) {
-  const now = DateTime.now().setZone(IST);
-  const today = now.toISODate();
+  const now = DateTime.now().setZone(IST); const today = now.toISODate();
   const stale = !cache.fetchedAt || (Date.now() - cache.fetchedAt) > NEWS_CACHE_MS || cache.date !== today;
   if (!force && !stale) return cache;
-  const previous = cache;
-  const result = await getTodayEvents();
+  const previous = cache; const result = await getTodayEvents();
   if (result.warnings.length) {
     console.warn("[news warnings]", result.warnings);
-    if (previous.date === today && previous.events.length) {
-      cache = { ...previous, warnings: result.warnings, fetchedAt: Date.now(), fromFallback: true };
-      return cache;
-    }
+    if (previous.date === today && previous.events.length) { cache = { ...previous, warnings: result.warnings, fetchedAt: Date.now(), fromFallback: true }; return cache; }
     const stored = loadNewsCache(today);
-    if (stored?.events?.length) {
-      cache = { date: today, events: stored.events, warnings: result.warnings, fetchedAt: Date.now(), fromFallback: true };
-      return cache;
-    }
-    cache = { date: today, events: [], warnings: result.warnings, fetchedAt: Date.now(), fromFallback: false };
-    return cache;
+    if (stored?.events?.length) { cache = { date: today, events: stored.events, warnings: result.warnings, fetchedAt: Date.now(), fromFallback: true }; return cache; }
+    cache = { date: today, events: [], warnings: result.warnings, fetchedAt: Date.now(), fromFallback: false }; return cache;
   }
   cache = { date: today, events: result.events, warnings: [], fetchedAt: Date.now(), fromFallback: false };
-  saveNewsCache(today, result.events);
-  return cache;
+  saveNewsCache(today, result.events); return cache;
 }
-
 async function resolveConfiguredChannel(config) {
   try {
     const guild = client.guilds.cache.get(config.guild_id);
@@ -99,73 +82,53 @@ async function resolveConfiguredChannel(config) {
     let channel = guild.channels.cache.get(config.channel_id) || await guild.channels.fetch(config.channel_id).catch(() => null);
     if (!isSupportedTextChannel(channel)) {
       const fallback = findNewsChannel(guild);
-      if (fallback) {
-        setGuildChannel(guild.id, fallback.id);
-        console.log(`[guild ${guild.id}] Recovered missing channel -> #${fallback.name}`);
-        return fallback;
-      }
+      if (fallback) { setGuildChannel(guild.id, fallback.id); console.log(`[guild ${guild.id}] Recovered missing channel -> #${fallback.name}`); return fallback; }
       return null;
     }
     return channel;
-  } catch (err) {
-    console.error(`[guild ${config.guild_id}] Channel resolve failed:`, err);
-    return null;
-  }
+  } catch (err) { console.error(`[guild ${config.guild_id}] Channel resolve failed:`, err); return null; }
 }
-
 async function postDailyToGuild(config, forcePost = false) {
-  const now = DateTime.now().setZone(IST);
-  const alertType = `daily-${now.toISODate()}`;
+  const now = DateTime.now().setZone(IST); const alertType = `daily-${now.toISODate()}`;
   if (!forcePost && wasSent(config.guild_id, now.toISODate(), alertType)) return;
-  const channel = await resolveConfiguredChannel(config);
-  if (!channel) return;
-  const { events, warnings, fromFallback } = await refreshNews(false);
-  const embeds = buildDailyEmbeds(events, now);
+  const channel = await resolveConfiguredChannel(config); if (!channel) return;
+  const { events, warnings, fromFallback } = await refreshNews(false); const embeds = buildDailyEmbeds(events, now);
   for (let i = 0; i < embeds.length; i++) await sendUniqueEmbed(channel, embeds[i], i === 0);
   if (!forcePost) markSent(config.guild_id, now.toISODate(), alertType);
   console.log(`[guild ${config.guild_id}] Daily news handled for #${channel.name}`);
   if (warnings.length) console.warn(`[${config.guild_id}] source warnings:`, warnings);
   if (fromFallback) console.warn(`[${config.guild_id}] Used cached Forex Factory schedule data.`);
 }
-
 async function process15MinuteReminders(config, events, now) {
-  const channel = await resolveConfiguredChannel(config);
-  if (!channel) return;
+  const channel = await resolveConfiguredChannel(config); if (!channel) return;
   for (const event of events) {
     const mins = event.timeIst.diff(now, "minutes").minutes;
-    const due = mins <= 15 && mins > 13.8;
-    const type = "reminder-15";
-    if (!due || wasSent(config.guild_id, event.key, type)) continue;
-    const embed = buildReminderEmbed(event);
-    await sendUniqueEmbed(channel, embed, true);
-    markSent(config.guild_id, event.key, type);
+    if (!(mins <= 15 && mins > 13.8) || wasSent(config.guild_id, event.key, "reminder-15")) continue;
+    await sendUniqueEmbed(channel, buildReminderEmbed(event), true);
+    markSent(config.guild_id, event.key, "reminder-15");
     console.log(`[guild ${config.guild_id}] 15m reminder handled for ${event.currency} ${event.title}`);
   }
 }
-
 async function processNewsResults(config, events, now) {
-  const channel = await resolveConfiguredChannel(config);
-  if (!channel) return;
+  const channel = await resolveConfiguredChannel(config); if (!channel) return;
   for (const event of events) {
     const minsSince = now.diff(event.timeIst, "minutes").minutes;
-    if (minsSince < 0 || minsSince > RESULT_WINDOW_MINUTES || !event.actual) continue;
-    const type = "news-result";
-    if (wasSent(config.guild_id, event.key, type)) continue;
-    const embed = buildResultEmbed(event);
-    await sendUniqueEmbed(channel, embed, true);
-    markSent(config.guild_id, event.key, type);
+    if (minsSince < 0 || minsSince > RESULT_WINDOW_MINUTES || !event.actual || wasSent(config.guild_id, event.key, "news-result")) continue;
+    await sendUniqueEmbed(channel, buildResultEmbed(event), true);
+    markSent(config.guild_id, event.key, "news-result");
     console.log(`[guild ${config.guild_id}] Result handled for ${event.currency} ${event.title} -> ${event.actual}`);
   }
 }
-
 async function schedulerTick() {
   if (tickRunning) return;
   tickRunning = true;
   try {
     const now = DateTime.now().setZone(IST);
+    const today = now.toISODate();
     if (now.hour === 23 && now.minute === 55) await recoverMissingGuildConfigs();
     if (now.hour === 23 && now.minute >= 50) await refreshNews(false);
-    if (now.hour === 0 && now.minute === 0) {
+    if (now.hour === 0 && now.minute === 0 && lastDailyRunDate !== today) {
+      lastDailyRunDate = today;
       await recoverMissingGuildConfigs();
       await refreshNews(true);
       const currentConfigs = getEnabledGuilds();
@@ -174,37 +137,28 @@ async function schedulerTick() {
         try { await postDailyToGuild(config); } catch (err) { console.error("Daily post failed:", config.guild_id, err); }
       }
     }
-
     let { events } = await refreshNews(false);
     const resultWindowOpen = events.some(event => {
       const minsSince = now.diff(event.timeIst, "minutes").minutes;
       return minsSince >= 0 && minsSince <= RESULT_WINDOW_MINUTES;
     });
-
     if (resultWindowOpen && Date.now() - lastResultPollAt >= RESULT_POLL_MS) {
       lastResultPollAt = Date.now();
       try {
         ({ events } = await refreshNews(true));
         events = await hydrateForexFactoryActuals(events, now);
         console.log(`[results] Forex Factory live page checked; ${events.filter(e => e.actual).length} event(s) currently have actual values.`);
-      } catch (err) {
-        console.error(`[results] Live Forex Factory result fetch failed: ${err?.message || err}`);
-      }
+      } catch (err) { console.error(`[results] Live Forex Factory result fetch failed: ${err?.message || err}`); }
     }
-
     const configs = getEnabledGuilds();
     for (const config of configs) {
       try { await process15MinuteReminders(config, events, now); } catch (err) { console.error("15m reminder failed:", config.guild_id, err); }
       try { await processNewsResults(config, events, now); } catch (err) { console.error("News result failed:", config.guild_id, err); }
     }
     if (now.hour === 3 && now.minute === 0) cleanupOldAlerts();
-  } catch (err) {
-    console.error("Scheduler tick failed:", err);
-  } finally {
-    tickRunning = false;
-  }
+  } catch (err) { console.error("Scheduler tick failed:", err); }
+  finally { tickRunning = false; }
 }
-
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Connected to ${readyClient.guilds.cache.size} Discord server(s).`);
@@ -214,17 +168,12 @@ client.once(Events.ClientReady, async readyClient => {
   await schedulerTick();
   setInterval(schedulerTick, 30_000);
 });
-
 client.on(Events.GuildCreate, async guild => {
   console.log(`Joined guild ${guild.id} (${guild.name}). Connected guilds: ${client.guilds.cache.size}`);
   const channel = findNewsChannel(guild);
-  if (channel && !getGuildConfig(guild.id)) {
-    setGuildChannel(guild.id, channel.id);
-    console.log(`[guild ${guild.id}] Auto-configured #${channel.name}`);
-  }
+  if (channel && !getGuildConfig(guild.id)) { setGuildChannel(guild.id, channel.id); console.log(`[guild ${guild.id}] Auto-configured #${channel.name}`); }
 });
 client.on(Events.GuildDelete, guild => removeGuild(guild.id));
-
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand() || !interaction.guildId) return;
   try {
@@ -234,8 +183,7 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!isSupportedTextChannel(channel)) return interaction.reply({ content: "Please select a text or announcement channel.", ephemeral: true });
       const guild = interaction.guild || client.guilds.cache.get(interaction.guildId);
       if (!guild) return interaction.reply({ content: "❌ I could not access this server. Please make sure the bot itself is added to the server.", ephemeral: true });
-      const me = guild.members.me;
-      if (!me) return interaction.reply({ content: "❌ I could not read my server permissions.", ephemeral: true });
+      const me = guild.members.me; if (!me) return interaction.reply({ content: "❌ I could not read my server permissions.", ephemeral: true });
       const perms = channel.permissionsFor(me);
       if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages) || !perms?.has(PermissionFlagsBits.EmbedLinks)) return interaction.reply({ content: "I need **View Channel**, **Send Messages**, and **Embed Links** permissions in that channel.", ephemeral: true });
       if (!perms?.has(PermissionFlagsBits.MentionEveryone)) return interaction.reply({ content: "I also need **Mention @everyone, @here, and All Roles** permission.", ephemeral: true });
@@ -266,5 +214,4 @@ client.on(Events.InteractionCreate, async interaction => {
     else await interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
   }
 });
-
 client.login(process.env.DISCORD_TOKEN);
